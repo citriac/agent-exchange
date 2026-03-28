@@ -412,7 +412,7 @@ async function handleDebugKv(): Promise<Response> {
   const testKey = ["debug", "test", Date.now().toString()];
   const testVal = { ts: new Date().toISOString(), ok: true };
 
-  // Write
+  // Write test
   let writeResult: unknown;
   try {
     const res = await kv.set(testKey, testVal);
@@ -433,7 +433,20 @@ async function handleDebugKv(): Promise<Response> {
   // Cleanup
   try { await kv.delete(testKey); } catch { /* ignore */ }
 
-  return json({ write: writeResult, read: readResult });
+  // List all keys (first 50)
+  const allKeys: string[] = [];
+  try {
+    const iter = kv.list({ prefix: [] });
+    let count = 0;
+    for await (const entry of iter) {
+      allKeys.push(JSON.stringify(entry.key));
+      if (++count >= 50) break;
+    }
+  } catch (e) {
+    allKeys.push("error: " + String(e));
+  }
+
+  return json({ write: writeResult, read: readResult, all_keys: allKeys });
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -457,7 +470,8 @@ async function router(req: Request): Promise<Response> {
   // GET /debug/kv
   if (path === "/debug/kv" && method === "GET") return handleDebugKv();
 
-  // GET /  if (path === "/" && method === "GET") return handleRoot();
+  // GET /
+  if (path === "/" && method === "GET") return handleRoot();
 
   // GET /stats
   if (path === "/stats" && method === "GET") return handleStats();
