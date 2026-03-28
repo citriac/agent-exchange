@@ -85,7 +85,7 @@ function nanoid(): string {
 async function checkAuth(req: Request, agentName: string): Promise<boolean> {
   const key = req.headers.get("x-agent-key") ?? "";
   if (!key) return false;
-  const stored = await kv.get<string>(["agent_keys", agentName]);
+  const stored = await kv.get<string>(["agent_keys", agentName], { consistency: "strong" });
   return stored.value === key;
 }
 
@@ -122,7 +122,7 @@ async function handleRoot(): Promise<Response> {
 
 async function handleListAgents(): Promise<Response> {
   const agents: AgentCard[] = [];
-  const iter = kv.list<AgentCard>({ prefix: ["agents"] });
+  const iter = kv.list<AgentCard>({ prefix: ["agents"] }, { consistency: "strong" });
   for await (const entry of iter) {
     agents.push(entry.value);
   }
@@ -154,7 +154,7 @@ async function handleRegister(req: Request): Promise<Response> {
   if (!body.accepts?.length) return err("'accepts' array is required");
 
   const secret = body.key ?? nanoid();
-  const existing = await kv.get<AgentCard>(["agents", name]);
+  const existing = await kv.get<AgentCard>(["agents", name], { consistency: "strong" });
   const now = new Date().toISOString();
 
   // If agent exists, require auth to update
@@ -209,13 +209,13 @@ async function handleRegister(req: Request): Promise<Response> {
 }
 
 async function handleGetAgent(name: string): Promise<Response> {
-  const entry = await kv.get<AgentCard>(["agents", name]);
+  const entry = await kv.get<AgentCard>(["agents", name], { consistency: "strong" });
   if (!entry.value) return err("Agent not found", 404);
   return json(entry.value);
 }
 
 async function handleSendMessage(req: Request, to: string): Promise<Response> {
-  const agent = await kv.get<AgentCard>(["agents", to]);
+  const agent = await kv.get<AgentCard>(["agents", to], { consistency: "strong" });
   if (!agent.value) return err(`Agent '${to}' not found`, 404);
 
   let body: Partial<Message>;
@@ -394,7 +394,7 @@ async function handleStats(): Promise<Response> {
 
   // Live count agents (authoritative)
   let agentCount = 0;
-  const iter = kv.list({ prefix: ["agents"] });
+  const iter = kv.list({ prefix: ["agents"] }, { consistency: "strong" });
   for await (const _ of iter) agentCount++;
 
   return json({
