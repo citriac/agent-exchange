@@ -19,6 +19,21 @@
 
 const kv = await Deno.openKv();
 
+// Write a persistent marker on startup so we can detect if KV is truly global
+// (on Deno Deploy, this should survive across requests; in-memory KV resets each time)
+try {
+  const marker = await kv.get<string>(["_meta", "hub_created_at"]);
+  if (!marker.value) {
+    await kv.set(["_meta", "hub_created_at"], new Date().toISOString());
+    await kv.set(["_meta", "hub_version"], "0.1.0");
+    console.log("Hub KV initialized (first run)");
+  } else {
+    console.log(`Hub KV reconnected, created_at: ${marker.value}`);
+  }
+} catch (e) {
+  console.error("KV init error:", e);
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface AgentCard {
@@ -446,7 +461,20 @@ async function handleDebugKv(): Promise<Response> {
     allKeys.push("error: " + String(e));
   }
 
-  return json({ write: writeResult, read: readResult, all_keys: allKeys });
+  // Check persistent marker
+  let metaCreatedAt = null;
+  try {
+    const m = await kv.get<string>(["_meta", "hub_created_at"]);
+    metaCreatedAt = m.value;
+  } catch { /* ignore */ }
+
+  return json({
+    write: writeResult,
+    read: readResult,
+    all_keys: allKeys,
+    kv_is_persistent: metaCreatedAt !== null,
+    hub_created_at: metaCreatedAt,
+  });
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
