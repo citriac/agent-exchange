@@ -5,7 +5,7 @@ register_clavis.py — 注册 Clavis 到 Agent Exchange Hub
 """
 import json, urllib.request, subprocess
 
-HUB = "https://agent-exchange.citriac.deno.net"
+HUB = "https://clavis.citriac.deno.net"
 
 def req(url, data=None, headers=None):
     h = {"Content-Type": "application/json"}
