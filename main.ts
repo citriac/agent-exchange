@@ -19,21 +19,6 @@
 
 const kv = await Deno.openKv();
 
-// Write a persistent marker on startup so we can detect if KV is truly global
-// (on Deno Deploy, this should survive across requests; in-memory KV resets each time)
-try {
-  const marker = await kv.get<string>(["_meta", "hub_created_at"]);
-  if (!marker.value) {
-    await kv.set(["_meta", "hub_created_at"], new Date().toISOString());
-    await kv.set(["_meta", "hub_version"], "0.1.0");
-    console.log("Hub KV initialized (first run)");
-  } else {
-    console.log(`Hub KV reconnected, created_at: ${marker.value}`);
-  }
-} catch (e) {
-  console.error("KV init error:", e);
-}
-
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface AgentCard {
@@ -428,57 +413,56 @@ async function handleStats(): Promise<Response> {
 // ─── Debug ───────────────────────────────────────────────────────────────────
 
 async function handleDebugKv(): Promise<Response> {
-  const testKey = ["debug", "test", Date.now().toString()];
-  const testVal = { ts: new Date().toISOString(), ok: true };
+  const ts = Date.now().toString();
+  const testKey = ["_debug", ts];
+  const testVal = { ts: new Date().toISOString(), rand: Math.random() };
 
-  // Write test
-  let writeResult: unknown;
+  // Write
+  let writeOk = false;
   try {
     const res = await kv.set(testKey, testVal);
-    writeResult = { ok: res.ok };
+    writeOk = res.ok;
   } catch (e) {
-    writeResult = { error: String(e) };
+    return json({ error: "write failed: " + String(e) }, 500);
   }
 
-  // Read back
-  let readResult: unknown;
+  // Immediate read-back (same isolate)
+  let readBack: unknown = null;
   try {
     const res = await kv.get(testKey);
-    readResult = { value: res.value, versionstamp: res.versionstamp };
-  } catch (e) {
-    readResult = { error: String(e) };
-  }
+    readBack = res.value;
+  } catch { /* ignore */ }
 
-  // Cleanup
-  try { await kv.delete(testKey); } catch { /* ignore */ }
-
-  // List all keys (first 50)
+  // List all keys
   const allKeys: string[] = [];
   try {
     const iter = kv.list({ prefix: [] });
     let count = 0;
     for await (const entry of iter) {
       allKeys.push(JSON.stringify(entry.key));
-      if (++count >= 50) break;
+      if (++count >= 30) break;
     }
   } catch (e) {
-    allKeys.push("error: " + String(e));
+    allKeys.push("list_error: " + String(e));
   }
 
-  // Check persistent marker
-  let metaCreatedAt = null;
-  try {
-    const m = await kv.get<string>(["_meta", "hub_created_at"]);
-    metaCreatedAt = m.value;
-  } catch { /* ignore */ }
-
   return json({
-    write: writeResult,
-    read: readResult,
+    write_ok: writeOk,
+    immediate_read: readBack ? "OK" : "FAILED",
+    written_key: JSON.stringify(testKey),
+    verify_url: `/debug/read?key=${encodeURIComponent(JSON.stringify(testKey))}`,
     all_keys: allKeys,
-    kv_is_persistent: metaCreatedAt !== null,
-    hub_created_at: metaCreatedAt,
+    note: "Call verify_url from a separate request to test cross-request KV persistence",
   });
+}
+
+async function handleDebugRead(url: URL): Promise<Response> {
+  const keyStr = url.searchParams.get("key");
+  if (!keyStr) return err("?key= required");
+  let key: unknown[];
+  try { key = JSON.parse(keyStr); } catch { return err("invalid key JSON"); }
+  const entry = await kv.get(key as Deno.KvKey);
+  return json({ key: keyStr, value: entry.value, versionstamp: entry.versionstamp, found: entry.value !== null });
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -501,6 +485,9 @@ async function router(req: Request): Promise<Response> {
 
   // GET /debug/kv
   if (path === "/debug/kv" && method === "GET") return handleDebugKv();
+
+  // GET /debug/read?key=...
+  if (path === "/debug/read" && method === "GET") return handleDebugRead(url);
 
   // GET /
   if (path === "/" && method === "GET") return handleRoot();
