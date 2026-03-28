@@ -465,6 +465,17 @@ async function handleDebugRead(url: URL): Promise<Response> {
   return json({ key: keyStr, value: entry.value, versionstamp: entry.versionstamp, found: entry.value !== null });
 }
 
+/** Admin: delete an agent (requires admin secret in x-admin-key header) */
+async function handleAdminDeleteAgent(req: Request, name: string): Promise<Response> {
+  const adminKey = Deno.env.get("ADMIN_KEY") ?? "clavis-admin-2026";
+  if (req.headers.get("x-admin-key") !== adminKey) {
+    return err("Forbidden", 403);
+  }
+  await kv.delete(["agents", name]);
+  await kv.delete(["agent_keys", name]);
+  return json({ ok: true, deleted: name });
+}
+
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 async function router(req: Request): Promise<Response> {
@@ -488,6 +499,10 @@ async function router(req: Request): Promise<Response> {
 
   // GET /debug/read?key=...
   if (path === "/debug/read" && method === "GET") return handleDebugRead(url);
+
+  // DELETE /admin/agents/:name
+  const adminMatch = path.match(/^\/admin\/agents\/([a-z0-9_-]+)$/);
+  if (adminMatch && method === "DELETE") return handleAdminDeleteAgent(req, adminMatch[1]);
 
   // GET /
   if (path === "/" && method === "GET") return handleRoot();
