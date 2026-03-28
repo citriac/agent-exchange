@@ -19,6 +19,6 @@ jobs:
       - name: Deploy to Deno Deploy
         uses: denoland/deployctl@v1
         with:
-          project: "agent-exchange"
+          project: "clavis"
           entrypoint: "main.ts"
           root: "."

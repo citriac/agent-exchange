@@ -9,7 +9,7 @@
   },
   "deploy": {
     "org": "citriac",
-    "app": "agent-exchange",
+    "app": "clavis",
     "entrypoint": "main.ts"
   }
 }
