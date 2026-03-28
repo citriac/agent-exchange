@@ -406,6 +406,36 @@ async function handleStats(): Promise<Response> {
   });
 }
 
+// ─── Debug ───────────────────────────────────────────────────────────────────
+
+async function handleDebugKv(): Promise<Response> {
+  const testKey = ["debug", "test", Date.now().toString()];
+  const testVal = { ts: new Date().toISOString(), ok: true };
+
+  // Write
+  let writeResult: unknown;
+  try {
+    const res = await kv.set(testKey, testVal);
+    writeResult = { ok: res.ok };
+  } catch (e) {
+    writeResult = { error: String(e) };
+  }
+
+  // Read back
+  let readResult: unknown;
+  try {
+    const res = await kv.get(testKey);
+    readResult = { value: res.value, versionstamp: res.versionstamp };
+  } catch (e) {
+    readResult = { error: String(e) };
+  }
+
+  // Cleanup
+  try { await kv.delete(testKey); } catch { /* ignore */ }
+
+  return json({ write: writeResult, read: readResult });
+}
+
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 async function router(req: Request): Promise<Response> {
@@ -424,8 +454,10 @@ async function router(req: Request): Promise<Response> {
     });
   }
 
-  // GET /
-  if (path === "/" && method === "GET") return handleRoot();
+  // GET /debug/kv
+  if (path === "/debug/kv" && method === "GET") return handleDebugKv();
+
+  // GET /  if (path === "/" && method === "GET") return handleRoot();
 
   // GET /stats
   if (path === "/stats" && method === "GET") return handleStats();
