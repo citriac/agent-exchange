@@ -201,6 +201,9 @@ async function handleRegister(req: Request): Promise<Response> {
     return err("KV write failed, please retry", 500);
   }
 
+  // Immediately read back to verify persistence
+  const verify = await kv.get<AgentCard>(["agents", name]);
+
   // Stats counter (best-effort, non-blocking)
   try {
     if (!existing.value) {
@@ -213,6 +216,7 @@ async function handleRegister(req: Request): Promise<Response> {
     ok: true,
     agent: card,
     key: existing.value ? undefined : secret,
+    _debug_verify: verify.value ? "KV_READ_OK" : "KV_READ_FAILED",
     message: existing.value
       ? "Agent card updated."
       : `Agent registered! Save your key — it won't be shown again: ${secret}`,
