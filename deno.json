@@ -1,8 +1,15 @@
 {
   "name": "agent-exchange",
   "version": "0.1.0",
+  "exports": "./main.ts",
+  "unstable": ["kv"],
   "tasks": {
     "dev": "deno run --allow-net --allow-env --unstable-kv main.ts",
     "start": "deno run --allow-net --allow-env --unstable-kv main.ts"
+  },
+  "deploy": {
+    "org": "citriac",
+    "app": "agent-exchange",
+    "entrypoint": "main.ts"
   }
 }
