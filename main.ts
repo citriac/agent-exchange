@@ -179,18 +179,25 @@ async function handleRegister(req: Request): Promise<Response> {
     updated_at: now,
   };
 
-  await kv.set(["agents", name], card);
-  await kv.set(["agent_keys", name], secret);
+  const r1 = await kv.set(["agents", name], card);
+  const r2 = await kv.set(["agent_keys", name], secret);
 
-  // Count registered agents for stats
-  await kv.atomic()
-    .sum(["stats", "total_agents"], 1n)
-    .commit();
+  if (!r1.ok || !r2.ok) {
+    return err("KV write failed, please retry", 500);
+  }
+
+  // Stats counter (best-effort, non-blocking)
+  try {
+    if (!existing.value) {
+      const cur = await kv.get<bigint>(["stats", "total_agents"]);
+      await kv.set(["stats", "total_agents"], (cur.value ?? 0n) + 1n);
+    }
+  } catch { /* ignore stats errors */ }
 
   return json({
     ok: true,
     agent: card,
-    key: existing.value ? undefined : secret, // only show key on first registration
+    key: existing.value ? undefined : secret,
     message: existing.value
       ? "Agent card updated."
       : `Agent registered! Save your key — it won't be shown again: ${secret}`,
@@ -231,10 +238,11 @@ async function handleSendMessage(req: Request, to: string): Promise<Response> {
 
   await kv.set(["inbox", to, msg.id], msg);
 
-  // Stats
-  await kv.atomic()
-    .sum(["stats", "total_messages"], 1n)
-    .commit();
+  // Stats (best-effort)
+  try {
+    const cur = await kv.get<bigint>(["stats", "total_messages"]);
+    await kv.set(["stats", "total_messages"], (cur.value ?? 0n) + 1n);
+  } catch { /* ignore */ }
 
   return json({
     ok: true,
@@ -364,9 +372,11 @@ async function handleAddLedger(req: Request, name: string): Promise<Response> {
 
   await kv.set(["ledger", name, entry.id], entry);
 
-  await kv.atomic()
-    .sum(["stats", "total_exchanges"], 1n)
-    .commit();
+  // Stats (best-effort)
+  try {
+    const cur = await kv.get<bigint>(["stats", "total_exchanges"]);
+    await kv.set(["stats", "total_exchanges"], (cur.value ?? 0n) + 1n);
+  } catch { /* ignore */ }
 
   return json({ ok: true, entry });
 }
@@ -378,7 +388,7 @@ async function handleStats(): Promise<Response> {
     kv.get<bigint>(["stats", "total_exchanges"]),
   ]);
 
-  // Live count agents
+  // Live count agents (authoritative)
   let agentCount = 0;
   const iter = kv.list({ prefix: ["agents"] });
   for await (const _ of iter) agentCount++;
@@ -388,8 +398,8 @@ async function handleStats(): Promise<Response> {
     version: "0.1.0",
     stats: {
       registered_agents: agentCount,
-      total_messages_sent: Number(messages.value ?? 0n),
-      total_value_exchanges: Number(exchanges.value ?? 0n),
+      total_messages_sent: agents.value != null ? Number(agents.value) : 0,
+      total_value_exchanges: messages.value != null ? Number(messages.value) : 0,
     },
     status: "live",
     timestamp: new Date().toISOString(),
