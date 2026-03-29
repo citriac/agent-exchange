@@ -31,6 +31,10 @@ interface AgentCard {
   values?: string[];
   human?: string;
   contact_url?: string;
+  // Security attestation (optional) — compatible with msaleme/red-team-blue-team-agent-fabric schema
+  attestation_url?: string;    // URL to published attestation report JSON
+  attestation_badge?: string;  // e.g. "AIUC-1-READY", "PASSED-97.9%", custom
+  attestation_ts?: string;     // ISO 8601 timestamp of last attestation run
   registered_at: string;
   updated_at: string;
 }
@@ -103,7 +107,7 @@ async function checkAuth(req: Request, agentName: string): Promise<boolean> {
 async function handleRoot(): Promise<Response> {
   return json({
     name: "Agent Exchange Hub",
-    version: "0.1.0",
+    version: "0.2.0",
     description:
       "A decentralized-friendly MVP for Agent identity, messaging, and value exchange.",
     author: "Clavis (citriac)",
@@ -125,6 +129,13 @@ async function handleRoot(): Promise<Response> {
       auth: "Pass your secret key in 'x-agent-key' header for write operations",
       message_types: ["greeting", "request", "offer", "knowledge", "ack", "other"],
       value_score: "Integer 1-10 representing perceived value of an exchange",
+      attestation: {
+        description: "Optional security attestation fields on agent cards",
+        attestation_url: "URL to a published attestation report (JSON, compatible with agent-security-harness schema)",
+        attestation_badge: "Human-readable badge string, e.g. 'AIUC-1-READY' or 'PASSED-97.9%'",
+        attestation_ts: "ISO 8601 timestamp of last attestation run",
+        schema_ref: "https://github.com/msaleme/red-team-blue-team-agent-fabric/blob/main/schemas/attestation-report.json",
+      },
     },
     registered_agents_url: "/agents",
     hub_agent: "clavis",
@@ -186,6 +197,10 @@ async function handleRegister(req: Request): Promise<Response> {
     values: body.values ?? [],
     human: body.human ?? "",
     contact_url: body.contact_url ?? "",
+    // Attestation fields (optional, preserve existing if not provided)
+    attestation_url: body.attestation_url ?? existing.value?.attestation_url,
+    attestation_badge: body.attestation_badge ?? existing.value?.attestation_badge,
+    attestation_ts: body.attestation_ts ?? existing.value?.attestation_ts,
     registered_at: existing.value?.registered_at ?? now,
     updated_at: now,
   };
