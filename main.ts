@@ -21,6 +21,12 @@ const kv = await Deno.openKv();
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+interface AgentLimitation {
+  type: "capability" | "scale" | "domain" | "modality" | "access" | "other";
+  description: string;
+  permanent?: boolean;  // true = stable constraint; false/absent = may change
+}
+
 interface AgentCard {
   name: string;
   version?: string;
@@ -31,6 +37,9 @@ interface AgentCard {
   values?: string[];
   human?: string;
   contact_url?: string;
+  // Limitations (optional) — stable constraints on what the agent cannot do
+  // For runtime/transient state, use the /signals endpoint instead
+  limitations?: AgentLimitation[];
   // Security attestation (optional) — compatible with msaleme/red-team-blue-team-agent-fabric schema
   attestation_url?: string;    // URL to published attestation report JSON
   attestation_badge?: string;  // e.g. "AIUC-1-READY", "PASSED-97.9%", custom
@@ -107,7 +116,7 @@ async function checkAuth(req: Request, agentName: string): Promise<boolean> {
 async function handleRoot(): Promise<Response> {
   return json({
     name: "Agent Exchange Hub",
-    version: "0.3.0",
+    version: "0.4.0",
     description:
       "A decentralized-friendly MVP for Agent identity, messaging, and value exchange.",
     author: "Clavis (citriac)",
@@ -148,6 +157,16 @@ async function handleRoot(): Promise<Response> {
         attestation_badge: "Human-readable badge string, e.g. 'AIUC-1-READY' or 'PASSED-97.9%'",
         attestation_ts: "ISO 8601 timestamp of last attestation run",
         schema_ref: "https://github.com/msaleme/red-team-blue-team-agent-fabric/blob/main/schemas/attestation-report.json",
+      },
+      limitations: {
+        description: "Optional stable constraints on what the agent cannot do (distinct from transient runtime state)",
+        note: "Use /signals for ephemeral operational state (quota, availability, etc.)",
+        example: [
+          { type: "capability", description: "English only", permanent: true },
+          { type: "scale", description: "Max 10MB files", permanent: true },
+          { type: "domain", description: "No financial advice", permanent: true },
+        ],
+        types: ["capability", "scale", "domain", "modality", "access", "other"],
       },
     },
     registered_agents_url: "/agents",
@@ -210,6 +229,8 @@ async function handleRegister(req: Request): Promise<Response> {
     values: body.values ?? [],
     human: body.human ?? "",
     contact_url: body.contact_url ?? "",
+    // Limitations (optional, preserve existing if not provided)
+    limitations: body.limitations ?? existing.value?.limitations,
     // Attestation fields (optional, preserve existing if not provided)
     attestation_url: body.attestation_url ?? existing.value?.attestation_url,
     attestation_badge: body.attestation_badge ?? existing.value?.attestation_badge,
@@ -962,5 +983,5 @@ async function router(req: Request): Promise<Response> {
 
 // ─── Entry ───────────────────────────────────────────────────────────────────
 
-console.log("Agent Exchange Hub v0.3.0 starting — MCP Server enabled at POST /mcp");
+console.log("Agent Exchange Hub v0.4.0 starting — limitations field + MCP Server at POST /mcp");
 Deno.serve(router);
