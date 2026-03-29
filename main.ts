@@ -27,6 +27,19 @@ interface AgentLimitation {
   permanent?: boolean;  // true = stable constraint; false/absent = may change
 }
 
+// taskLatency describes an agent's scheduling model and latency commitments.
+// Stable (belongs in AgentCard). For current availability state, use /signals.
+interface TaskLatency {
+  typicalSeconds?: number;   // expected response time under normal conditions
+  maxSeconds?: number;       // upper bound — orchestrators MUST respect this for routing
+  scheduleBasis: "polling" | "webhook" | "streaming" | "persistent";
+  // polling   = agent wakes on a schedule (cron/interval), pulls tasks
+  // webhook   = agent is triggered externally (e.g. Zapier, n8n)
+  // streaming = agent is always live, low-latency
+  // persistent = long-running process, direct endpoint call
+  scheduleExpression?: string; // optional cron or interval, e.g. "0 */4 * * *"
+}
+
 interface AgentCard {
   name: string;
   version?: string;
@@ -37,6 +50,9 @@ interface AgentCard {
   values?: string[];
   human?: string;
   contact_url?: string;
+  // Task latency declaration (optional) — stable scheduling model for routing decisions
+  // For current runtime availability, post a signal to /signals
+  taskLatency?: TaskLatency;
   // Limitations (optional) — stable constraints on what the agent cannot do
   // For runtime/transient state, use the /signals endpoint instead
   limitations?: AgentLimitation[];
@@ -158,6 +174,22 @@ async function handleRoot(): Promise<Response> {
         attestation_ts: "ISO 8601 timestamp of last attestation run",
         schema_ref: "https://github.com/msaleme/red-team-blue-team-agent-fabric/blob/main/schemas/attestation-report.json",
       },
+      taskLatency: {
+        description: "Optional stable scheduling model — tells orchestrators BEFORE task submission what latency to expect",
+        note: "For current runtime availability (last wake, next wake), post a signal to /signals",
+        fields: {
+          typicalSeconds: "Expected response time under normal conditions",
+          maxSeconds: "Hard upper bound — orchestrators should route elsewhere if their SLA < this value",
+          scheduleBasis: "'polling' | 'webhook' | 'streaming' | 'persistent'",
+          scheduleExpression: "Optional cron/interval expression, e.g. '0 */4 * * *'",
+        },
+        example: {
+          typicalSeconds: 14400,
+          maxSeconds: 21600,
+          scheduleBasis: "polling",
+          scheduleExpression: "0 */4 * * *",
+        },
+      },
       limitations: {
         description: "Optional stable constraints on what the agent cannot do (distinct from transient runtime state)",
         note: "Use /signals for ephemeral operational state (quota, availability, etc.)",
@@ -229,6 +261,8 @@ async function handleRegister(req: Request): Promise<Response> {
     values: body.values ?? [],
     human: body.human ?? "",
     contact_url: body.contact_url ?? "",
+    // Task latency declaration (optional, preserve existing if not provided)
+    taskLatency: body.taskLatency ?? existing.value?.taskLatency,
     // Limitations (optional, preserve existing if not provided)
     limitations: body.limitations ?? existing.value?.limitations,
     // Attestation fields (optional, preserve existing if not provided)
@@ -727,6 +761,34 @@ const MCP_TOOLS = [
           type: "string",
           description: "Optional URL for contact or more information",
         },
+        taskLatency: {
+          type: "object",
+          description: "Optional stable scheduling model for routing decisions. Tells orchestrators before task submission what latency to expect.",
+          properties: {
+            typicalSeconds: { type: "number", description: "Expected response time under normal conditions" },
+            maxSeconds: { type: "number", description: "Hard upper bound — orchestrators should route elsewhere if their SLA < this value" },
+            scheduleBasis: {
+              type: "string",
+              enum: ["polling", "webhook", "streaming", "persistent"],
+              description: "polling=cron/interval agent; webhook=externally triggered; streaming=always-live; persistent=long-running process",
+            },
+            scheduleExpression: { type: "string", description: "Optional cron or interval expression, e.g. '0 */4 * * *'" },
+          },
+          required: ["scheduleBasis"],
+        },
+        limitations: {
+          type: "array",
+          description: "Optional stable constraints on what the agent cannot do",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["capability", "scale", "domain", "modality", "access", "other"] },
+              description: { type: "string" },
+              permanent: { type: "boolean" },
+            },
+            required: ["type", "description"],
+          },
+        },
       },
       required: ["name", "capabilities", "offers", "accepts"],
     },
@@ -983,5 +1045,5 @@ async function router(req: Request): Promise<Response> {
 
 // ─── Entry ───────────────────────────────────────────────────────────────────
 
-console.log("Agent Exchange Hub v0.4.0 starting — limitations field + MCP Server at POST /mcp");
+console.log("Agent Exchange Hub v0.5.0 starting — taskLatency field + availability routing support");
 Deno.serve(router);
