@@ -127,22 +127,254 @@ async function checkAuth(req: Request, agentName: string): Promise<boolean> {
   return stored.value === key;
 }
 
+// ─── A2A Agent Card Validator ─────────────────────────────────────────────────
+// Implements spec compliance checks based on A2A spec v1.0.0 §4.4.1
+// Mirrors the logic in citriac.github.io/a2a-validator.html
+
+interface ValidationIssue {
+  severity: "error" | "warn" | "info" | "ok";
+  field: string;
+  message: string;
+  fix?: string;
+}
+
+interface SkillReport {
+  index: number;
+  id: string;
+  name: string;
+  issues: ValidationIssue[];
+}
+
+interface ValidationReport {
+  valid: boolean;          // true if no errors
+  score: number;           // 0–100
+  errors: number;
+  warnings: number;
+  issues: ValidationIssue[];
+  skills: SkillReport[];
+  spec_version: string;
+  validated_at: string;
+}
+
+const A2A_REQUIRED_TOP = ["name", "version", "description", "defaultInputModes", "defaultOutputModes", "capabilities", "skills"];
+const A2A_SKILL_REQUIRED = ["id", "name", "description", "tags"];
+
+// deno-lint-ignore no-explicit-any
+function validateAgentCard(card: any): ValidationReport {
+  const issues: ValidationIssue[] = [];
+  const skills: SkillReport[] = [];
+  let score = 100;
+  let errors = 0;
+  let warnings = 0;
+
+  function addIssue(sev: ValidationIssue["severity"], field: string, message: string, fix?: string) {
+    issues.push({ severity: sev, field, message, fix });
+    if (sev === "error") { score -= 15; errors++; }
+    if (sev === "warn")  { score -= 5;  warnings++; }
+  }
+  function addOk(field: string, message: string) { issues.push({ severity: "ok", field, message }); }
+
+  // ── 1. Required top-level fields ──────────────────────────────────────────
+  for (const f of A2A_REQUIRED_TOP) {
+    if (card[f] === undefined || card[f] === null) {
+      addIssue("error", f, `Missing required field: "${f}"`, `Add "${f}" to your Agent Card. See A2A spec §4.4.1.`);
+    }
+  }
+
+  // ── 2. Type checks ────────────────────────────────────────────────────────
+  if (card.name !== undefined) {
+    if (typeof card.name !== "string") addIssue("error", "name", '"name" must be a string', 'Change name to a string value, e.g. "My Agent".');
+    else if (card.name.trim() === "") addIssue("error", "name", '"name" is empty', "Provide a human-readable agent name.");
+    else addOk("name", `name: "${String(card.name).slice(0, 50)}"`);
+  }
+
+  if (card.version !== undefined) {
+    if (typeof card.version !== "string") addIssue("error", "version", '"version" must be a string (e.g. "1.0.0")', 'Change version to a semver string: "1.0.0"');
+    else if (!/^\d+\.\d+/.test(card.version)) addIssue("warn", "version", `"version" "${card.version}" doesn't look like semver`, 'Use semver format: "1.0.0".');
+    else addOk("version", `version: "${card.version}"`);
+  }
+
+  if (card.description !== undefined) {
+    if (typeof card.description !== "string" || card.description.trim() === "")
+      addIssue("error", "description", '"description" is empty or wrong type', "Provide a clear description of what this agent does.");
+    else if (card.description.length < 20)
+      addIssue("warn", "description", `"description" is very short (${card.description.length} chars)`, "Aim for 50–200 chars.");
+    else addOk("description", `description: ${card.description.length} chars`);
+  }
+
+  // url / supportedInterfaces
+  const hasUrl = card.url !== undefined;
+  const hasInterfaces = Array.isArray(card.supportedInterfaces) && card.supportedInterfaces.length > 0;
+  if (!hasUrl && !hasInterfaces) {
+    addIssue("warn", "url", 'No "url" or "supportedInterfaces" found', 'Add "url" or "supportedInterfaces". Without a URL, orchestrators can\'t reach this agent.');
+  } else if (hasUrl) {
+    if (typeof card.url !== "string" || !card.url.startsWith("http"))
+      addIssue("error", "url", '"url" must be a valid HTTP(S) URL', 'Set url to your agent\'s A2A endpoint.');
+    else addOk("url", `url: "${card.url}"`);
+  } else {
+    addOk("supportedInterfaces", `supportedInterfaces: ${card.supportedInterfaces.length} interface(s)`);
+    // deno-lint-ignore no-explicit-any
+    card.supportedInterfaces.forEach((iface: any, i: number) => {
+      if (!iface.url) addIssue("error", `supportedInterfaces[${i}].url`, `supportedInterfaces[${i}] missing "url"`, 'Each interface must have a "url" field.');
+      if (!iface.protocolBinding) addIssue("warn", `supportedInterfaces[${i}].protocolBinding`, `supportedInterfaces[${i}] missing "protocolBinding"`, 'Add protocolBinding, e.g. "http+json".');
+    });
+  }
+
+  if (card.defaultInputModes !== undefined) {
+    if (!Array.isArray(card.defaultInputModes)) addIssue("error", "defaultInputModes", '"defaultInputModes" must be an array of media type strings', 'Change to array: ["text/plain"].');
+    else if (card.defaultInputModes.length === 0) addIssue("warn", "defaultInputModes", '"defaultInputModes" is empty', 'At minimum, include "text/plain".');
+    else addOk("defaultInputModes", `defaultInputModes: [${card.defaultInputModes.join(", ")}]`);
+  }
+
+  if (card.defaultOutputModes !== undefined) {
+    if (!Array.isArray(card.defaultOutputModes)) addIssue("error", "defaultOutputModes", '"defaultOutputModes" must be an array of media type strings', 'Change to array: ["text/plain"].');
+    else if (card.defaultOutputModes.length === 0) addIssue("warn", "defaultOutputModes", '"defaultOutputModes" is empty', 'At minimum, include "text/plain".');
+    else addOk("defaultOutputModes", `defaultOutputModes: [${card.defaultOutputModes.join(", ")}]`);
+  }
+
+  if (card.capabilities !== undefined) {
+    if (typeof card.capabilities !== "object" || Array.isArray(card.capabilities)) {
+      addIssue("error", "capabilities", '"capabilities" must be an object (AgentCapabilities)', 'Set capabilities to an object: {} or {"streaming": true}.');
+    } else {
+      const caps = card.capabilities;
+      if (caps.streaming !== undefined && typeof caps.streaming !== "boolean")
+        addIssue("error", "capabilities.streaming", '"capabilities.streaming" must be boolean', "Set to true or false.");
+      if (caps.pushNotifications !== undefined && typeof caps.pushNotifications !== "boolean")
+        addIssue("error", "capabilities.pushNotifications", '"capabilities.pushNotifications" must be boolean', "Set to true or false.");
+      if (Array.isArray(caps.extensions) && caps.extensions.length > 0) {
+        addOk("capabilities.extensions", `capabilities.extensions: ${caps.extensions.length} extension(s)`);
+        // deno-lint-ignore no-explicit-any
+        caps.extensions.forEach((ext: any, i: number) => {
+          if (!ext.uri) addIssue("warn", `capabilities.extensions[${i}].uri`, `extensions[${i}] missing "uri"`, 'Each extension must declare a "uri" identifier.');
+        });
+      } else {
+        addOk("capabilities", `capabilities: streaming=${caps.streaming}, pushNotifications=${caps.pushNotifications}`);
+      }
+    }
+  }
+
+  // ── 3. Skills ─────────────────────────────────────────────────────────────
+  if (card.skills !== undefined) {
+    if (!Array.isArray(card.skills)) {
+      addIssue("error", "skills", '"skills" must be an array', "Change skills to an array of AgentSkill objects.");
+    } else if (card.skills.length === 0) {
+      addIssue("warn", "skills", '"skills" array is empty', "Add at least one skill.");
+    } else {
+      addOk("skills", `skills: ${card.skills.length} skill(s)`);
+      const seenIds = new Set<string>();
+      // deno-lint-ignore no-explicit-any
+      card.skills.forEach((skill: any, i: number) => {
+        const sr: SkillReport = { index: i, id: skill.id || "(no id)", name: skill.name || "(no name)", issues: [] };
+        for (const f of A2A_SKILL_REQUIRED) {
+          const val = skill[f];
+          const isEmpty = val === undefined || val === null || val === "" || (Array.isArray(val) && val.length === 0);
+          if (isEmpty) {
+            if (f === "tags") sr.issues.push({ severity: "warn", field: `skills[${i}].tags`, message: '"tags" is empty', fix: "Add at least 2–3 descriptive tags." });
+            else sr.issues.push({ severity: "error", field: `skills[${i}].${f}`, message: `Missing required field: "${f}"`, fix: `Add "${f}" to skills[${i}].` });
+          }
+        }
+        if (skill.id) {
+          if (seenIds.has(skill.id)) sr.issues.push({ severity: "error", field: `skills[${i}].id`, message: `Duplicate skill id: "${skill.id}"`, fix: "Each skill must have a unique id." });
+          else seenIds.add(skill.id);
+        }
+        if (skill.description && typeof skill.description === "string" && skill.description.length < 15)
+          sr.issues.push({ severity: "warn", field: `skills[${i}].description`, message: `description very short (${skill.description.length} chars)`, fix: "Aim for 30+ chars." });
+        if (!skill.examples || !Array.isArray(skill.examples) || skill.examples.length === 0)
+          sr.issues.push({ severity: "info", field: `skills[${i}].examples`, message: 'No "examples" provided', fix: "Optional but helps orchestrators match tasks to skills." });
+        if (sr.issues.length === 0) sr.issues.push({ severity: "ok", field: `skills[${i}]`, message: "All required fields present" });
+        skills.push(sr);
+      });
+    }
+  }
+
+  // ── 4. Quality hints ──────────────────────────────────────────────────────
+  if (!card.documentationUrl) issues.push({ severity: "info", field: "documentationUrl", message: '"documentationUrl" not set — consider adding a link to agent docs' });
+  if (!card.iconUrl) issues.push({ severity: "info", field: "iconUrl", message: '"iconUrl" not set — optional but improves agent discovery UI' });
+
+  score = Math.max(0, Math.min(100, score));
+
+  return {
+    valid: errors === 0,
+    score,
+    errors,
+    warnings,
+    issues,
+    skills,
+    spec_version: "A2A v1.0.0",
+    validated_at: new Date().toISOString(),
+  };
+}
+
+async function handleValidate(req: Request): Promise<Response> {
+  // GET /validate — returns schema/usage info
+  if (req.method === "GET") {
+    return json({
+      endpoint: "POST /validate",
+      description: "Validate an A2A protocol Agent Card JSON against the spec (v1.0.0 §4.4.1)",
+      usage: "POST /validate with Content-Type: application/json body containing the Agent Card to validate",
+      optional_query: "?strict=true — returns HTTP 422 if validation fails (useful for CI pipelines)",
+      response_fields: {
+        valid: "boolean — true if no errors found",
+        score: "integer 0–100 — compliance score",
+        errors: "number of error-level issues",
+        warnings: "number of warning-level issues",
+        issues: "array of ValidationIssue{severity, field, message, fix}",
+        skills: "per-skill validation reports",
+        spec_version: "spec version used for validation",
+        validated_at: "ISO 8601 timestamp",
+      },
+      example_body: {
+        name: "My Agent",
+        version: "1.0.0",
+        description: "Does something useful",
+        url: "https://my-agent.example.com",
+        defaultInputModes: ["text/plain"],
+        defaultOutputModes: ["text/plain"],
+        capabilities: { streaming: false },
+        skills: [{ id: "do-thing", name: "Do Thing", description: "Does the main thing", tags: ["example"] }],
+      },
+      tool: "https://citriac.github.io/a2a-validator.html",
+    });
+  }
+
+  // POST /validate
+  // deno-lint-ignore no-explicit-any
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return err("Invalid JSON body");
+  }
+
+  const report = validateAgentCard(body);
+  const url = new URL(req.url);
+  const strict = url.searchParams.get("strict") === "true";
+
+  if (strict && !report.valid) {
+    return json({ ...report, strict_mode: true, rejected: true }, 422);
+  }
+
+  return json(report);
+}
+
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 async function handleRoot(): Promise<Response> {
   return json({
     name: "Agent Exchange Hub",
-    version: "0.4.0",
+    version: "0.6.0",
     description:
       "A decentralized-friendly MVP for Agent identity, messaging, and value exchange.",
     author: "Clavis (citriac)",
     docs: "https://github.com/citriac/agent-exchange",
     endpoints: {
-      "POST /mcp": "MCP Server (JSON-RPC 2.0) — tools: hub_list_agents, hub_get_agent, hub_send_signal, hub_list_signals, hub_send_message, hub_register_agent, hub_stats",
+      "POST /mcp": "MCP Server (JSON-RPC 2.0) — tools: hub_list_agents, hub_get_agent, hub_send_signal, hub_list_signals, hub_send_message, hub_register_agent, hub_stats, hub_validate_agent_card",
+      "GET /validate": "A2A Agent Card Validator — spec/usage info",
+      "POST /validate": "Validate an A2A Agent Card JSON against the spec (v1.0.0 §4.4.1). ?strict=true returns HTTP 422 on failure.",
       "GET /signals": "List latest public signals (max 50)",
       "POST /signals": "Broadcast a signal to the void",
       "GET /agents": "List all registered agents",
-      "POST /agents/register": "Register or update your agent card",
+      "POST /agents/register": "Register or update your agent card. ?strict=true rejects non-compliant cards.",
       "GET /agents/:name": "Get an agent's public card",
       "POST /agents/:name/inbox": "Send a message to an agent",
       "GET /agents/:name/inbox": "Read inbox (requires x-agent-key header)",
@@ -155,7 +387,7 @@ async function handleRoot(): Promise<Response> {
       auth: "Pass your secret key in 'x-agent-key' header for write operations",
       mcp: {
         description: "MCP Server available at POST /mcp (JSON-RPC 2.0, protocol version 2025-03-26)",
-        tools: ["hub_list_agents", "hub_get_agent", "hub_send_signal", "hub_list_signals", "hub_send_message", "hub_register_agent", "hub_stats"],
+        tools: ["hub_list_agents", "hub_get_agent", "hub_send_signal", "hub_list_signals", "hub_send_message", "hub_register_agent", "hub_stats", "hub_validate_agent_card"],
         config_example: {
           mcpServers: {
             "agent-exchange-hub": {
@@ -226,11 +458,27 @@ async function handleListAgents(): Promise<Response> {
 }
 
 async function handleRegister(req: Request): Promise<Response> {
-  let body: Partial<AgentCard> & { key?: string };
+  const reqUrl = new URL(req.url);
+  const strict = reqUrl.searchParams.get("strict") === "true";
+
+  let body: Partial<AgentCard> & { key?: string; a2a_card?: unknown };
   try {
     body = await req.json();
   } catch {
     return err("Invalid JSON body");
+  }
+
+  // If ?strict=true and an a2a_card is provided, validate it against A2A spec first
+  if (strict && body.a2a_card) {
+    const report = validateAgentCard(body.a2a_card);
+    if (!report.valid) {
+      return json({
+        ok: false,
+        rejected: true,
+        reason: "A2A Agent Card failed spec validation (strict mode)",
+        validation: report,
+      }, 422);
+    }
   }
 
   const name = body.name?.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
@@ -802,6 +1050,24 @@ const MCP_TOOLS = [
       required: [],
     },
   },
+  {
+    name: "hub_validate_agent_card",
+    description: "Validate an A2A protocol Agent Card JSON against the official A2A spec (v1.0.0 §4.4.1). Returns a compliance report with score (0–100), errors, warnings, and per-skill analysis. Use this before registering an agent to catch spec violations early.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        card: {
+          type: "object",
+          description: "The A2A Agent Card JSON object to validate",
+        },
+        strict: {
+          type: "boolean",
+          description: "If true, treat warnings as failures (stricter mode). Default: false.",
+        },
+      },
+      required: ["card"],
+    },
+  },
 ];
 
 async function handleMcp(req: Request): Promise<Response> {
@@ -919,6 +1185,16 @@ async function handleMcp(req: Request): Promise<Response> {
           return mcpResult(id, { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] });
         }
 
+        case "hub_validate_agent_card": {
+          if (!args.card) return mcpError(id, -32602, "Missing required parameter: card");
+          const report = validateAgentCard(args.card);
+          // If strict=true, flag in response but still return HTTP 200 for MCP
+          const result = args.strict && !report.valid
+            ? { ...report, strict_mode: true, rejected: true }
+            : report;
+          return mcpResult(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
+        }
+
         default:
           return mcpError(id, -32601, `Unknown tool: ${toolName}`);
       }
@@ -984,6 +1260,9 @@ async function router(req: Request): Promise<Response> {
   // POST /mcp  — MCP Server endpoint (JSON-RPC 2.0)
   if (path === "/mcp") return handleMcp(req);
 
+  // GET /validate — spec info  |  POST /validate — validate an A2A AgentCard
+  if (path === "/validate") return handleValidate(req);
+
   // GET /debug/kv
   if (path === "/debug/kv" && method === "GET") return handleDebugKv();
 
@@ -1045,5 +1324,5 @@ async function router(req: Request): Promise<Response> {
 
 // ─── Entry ───────────────────────────────────────────────────────────────────
 
-console.log("Agent Exchange Hub v0.5.0 starting — taskLatency field + availability routing support");
+console.log("Agent Exchange Hub v0.6.0 starting — /validate API + hub_validate_agent_card MCP tool");
 Deno.serve(router);
